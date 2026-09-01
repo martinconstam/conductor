@@ -1140,6 +1140,15 @@ public class WorkflowExecutorOps implements WorkflowExecutor {
         watch.start();
         boolean lockAcquired = executionLockService.acquireLock(workflowId);
         if (!lockAcquired) {
+            // WW fix (upstream design 2026-07-09 "lock-contention-decider-requeue"): lock
+            // contention is transient (millisecond-scale) — re-queue the workflow for a prompt
+            // retry instead of silently returning. Otherwise the workflow stays parked until its
+            // decider-queue entry (postponed by a polled task's responseTimeoutSeconds) becomes
+            // due, stalling dynamic FORK/JOINs for minutes to hours. Backoff is
+            // lockTimeToTry-scale, not lockLeaseTime-scale (the latter is only for an orphaned
+            // lock).
+            long backoffMillis = Math.max(properties.getLockTimeToTry().toMillis() / 2, 100);
+            queueDAO.push(DECIDER_QUEUE, workflowId, 0, Duration.ofMillis(backoffMillis));
             return null;
         }
         try {
@@ -1166,6 +1175,10 @@ public class WorkflowExecutorOps implements WorkflowExecutor {
             LOGGER.debug(
                     "decideWithLock couldn't acquire lock for workflow {}",
                     workflow.getWorkflowId());
+            // WW fix: see decide(String) — re-queue for a prompt retry on lock contention.
+            long backoffMillis = Math.max(properties.getLockTimeToTry().toMillis() / 2, 100);
+            queueDAO.push(
+                    DECIDER_QUEUE, workflow.getWorkflowId(), 0, Duration.ofMillis(backoffMillis));
             return null;
         }
         try {

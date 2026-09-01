@@ -15,6 +15,7 @@ package com.netflix.conductor.core.execution.tasks;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
 
 import org.springframework.stereotype.Component;
@@ -144,7 +145,16 @@ public class Join extends WorkflowSystemTask {
         }
 
         double exp = pollCount - properties.getSystemTaskPostponeThreshold();
-        return Optional.of(Math.min((long) Math.pow(EVALUATION_OFFSET_BASE, exp), maxOffset));
+        long offset = Math.min((long) Math.pow(EVALUATION_OFFSET_BASE, exp), maxOffset);
+        // WW fix: apply +/-50% jitter so long-postponed JOINs do not re-become due as a
+        // synchronized thundering herd (e.g. after a restart made tens of thousands of
+        // parked JOINs overdue at once, pinning the CPU and causing 504s). Jitter spreads
+        // the re-evaluations evenly over time; the fast path (offset 0) is untouched.
+        if (offset > 1) {
+            offset = (long) (offset * (0.5 + ThreadLocalRandom.current().nextDouble()));
+            offset = Math.min(offset, maxOffset);
+        }
+        return Optional.of(offset);
     }
 
     public boolean isAsync() {
